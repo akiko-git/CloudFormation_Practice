@@ -1,0 +1,332 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CodePipeline For EC2 with GitHub
+
+Parameters:
+
+  # 実行対象のリージョン
+  Region:
+    Type: String
+    Default: "ap-northeast-1"
+
+  # GitHubのユーザー名
+  Owner:
+    Type: String
+    Default: akiko-git
+
+  # GitHubリポジトリ
+  Repo:
+    Type: String
+    Description: GitHub repo name used in this pipeline's source.
+
+  # GitHubのアクセストークン
+  OAuthToken:
+    Type: String
+
+  # GitHubのシークレットトークン
+  GitHubSecret:
+    Type: String
+
+  # トリガー対象のブランチ名
+  Branch:
+    Type: String
+    Description: GitHub branch name to execte pipeline.
+    Default: master
+
+  # パイプラインの成果物を保管するS3バケット名
+  CodePipelineArtifactStoreBucketName:
+    Type: String
+    Default: pipeline-manifest
+    Description: Bucket name of code pipeline's artifact.
+
+Resources:
+
+  # GitHub webhook
+  PipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties: 
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref GitHubSecret
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: 'refs/heads/{Branch}'
+      TargetPipeline: !Ref Pipeline
+      TargetAction: SourceAction
+      Name: GitHubPipelineWebhook
+      TargetPipelineVersion: !GetAtt Pipeline.Version
+      RegisterWithThirdParty: "true"
+
+  # IAM Role for Code Pipeline service Role
+  CodePipelineServiceRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Temp-Deploy-CodePipelineServiceRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipelineFullAccess
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "codepipeline.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }]
+        }
+  CodePipelineServiceRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: Temp-Deploy-CodePipelineServiceRolePolicy
+      Roles:
+      - !Ref CodePipelineServiceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+          Resource:
+            - arn:aws:s3:::codepipeline*
+            - arn:aws:s3:::elasticbeanstalk*
+        - Effect: Allow
+          Action:
+            - codecommit:GetRepository
+            - codecommit:ListBranches
+            - codecommit:CancelUploadArchive
+            - codecommit:GetBranch
+            - codecommit:GetCommit
+            - codecommit:GetUploadArchiveStatus
+            - codecommit:UploadArchive
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - codedeploy:CreateDeployment
+            - codedeploy:GetApplicationRevision
+            - codedeploy:GetDeployment
+            - codedeploy:GetDeploymentConfig
+            - codedeploy:RegisterApplicationRevision
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - elasticbeanstalk:*
+            - ec2:*
+            - elasticloadbalancing:*
+            - autoscaling:*
+            - cloudwatch:*
+            - s3:*
+            - sns:*
+            - cloudformation:*
+            - rds:*
+            - sqs:*
+            - ecs:*
+            - iam:PassRole
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+            - lambda:ListFunctions
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - cloudformation:CreateStack
+            - cloudformation:DeleteStack
+            - cloudformation:DescribeStacks
+            - cloudformation:UpdateStack
+            - cloudformation:CreateChangeSet
+            - cloudformation:DeleteChangeSet
+            - cloudformation:DescribeChangeSet
+            - cloudformation:ExecuteChangeSet
+            - cloudformation:SetStackPolicy
+            - cloudformation:ValidateTemplate
+            - iam:PassRole
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - codebuild:BatchGetBuilds
+            - codebuild:StartBuild
+          Resource: "*"
+
+  # IAM Role for Code Deploy Service role.
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Temp-CodeDeployServiceRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  # IAM Role for Code Build Service role.
+  CodeBuildServiceRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: Temp-Deploy-CodeBuildServiceRole
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "codebuild.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }]
+        }
+
+  CodeBuildServiceRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: Temp-Deploy-CodeBuildServiceRolePolicy
+      Roles:
+      - !Ref CodeBuildServiceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+          Resource:
+            - !Sub arn:aws:s3:::${CodePipelineArtifactStoreBucket}*
+        - Effect: Allow
+          Action:
+            - ssm:GetParameters
+          Resource:
+            - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CodeBuild/*
+
+  #S3
+  CodePipelineArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${CodePipelineArtifactStoreBucketName}-${AWS::AccountId}
+
+
+  # Code Build Project.
+  # CodeBuildProjectBuildApplicationAndPushToECR:
+  #   Description: Creating AWS CodeBuild project
+  #   Type: AWS::CodeBuild::Project
+  #   Properties:
+  #     Artifacts:
+  #       Type: CODEPIPELINE
+  #     Description: !Sub Building stage for ${Branch}.
+  #     Environment:
+  #       ComputeType: BUILD_GENERAL1_SMALL
+  #       EnvironmentVariables:
+  #         - Name: Branch
+  #           Value: !Ref Branch
+  #         - Name: EKS_CLUSTER_NAME
+  #           Value: !Ref EKSClusterName
+  #         - Name: REGION
+  #           Value: !Ref Region
+  #         - Name: KUBECTL_VERSION
+  #           Value: !Ref KubectlVersion
+  #         - Name: REGISTORY_NAME
+  #           Value: !Ref ECRNameForSampleAP
+  #         - Name: REGISTORY_URI
+  #           Value: !Sub ${AWS::AccountId}.dkr.ecr.${Region}.amazonaws.com
+  #       Image: aws/codebuild/standard:2.0
+  #       Type: LINUX_CONTAINER
+  #       PrivilegedMode: True
+  #     Name: EKS-SampleAP-build
+  #     ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+  #     Source:
+  #       Type: CODEPIPELINE
+  #       BuildSpec: cicd/cloudformation/buildspec-build.yaml
+  #     TimeoutInMinutes: 5
+
+  #CodeDeploy
+  CodeDeployApplycation:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: Temp-CodeDeployApplycation
+
+
+  CodeDeployGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplycation
+      DeploymentGroupName: Temp-CodeDeployGroup
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
+      Ec2TagFilters:
+        - Type: KEY_AND_VALUE
+          Key: Name
+          # Value: temp_NatInstance
+          Value: temp_WebInstance
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+
+
+
+  # Main process of Code Pipeline.
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref CodePipelineArtifactStoreBucket
+        Type: S3
+      Name: Temp-deploy-Pipeline
+      RestartExecutionOnUpdate: false
+      RoleArn:
+        !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - 
+          Name: Source
+          Actions:
+            -
+              Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              OutputArtifacts:
+                -
+                  Name: SourceOutput
+              Configuration:
+                Owner: !Ref Owner
+                Repo: !Ref Repo
+                Branch: !Ref Branch
+                OAuthToken: !Ref OAuthToken
+                PollForSourceChanges: false
+              RunOrder: 1
+        - 
+          Name: Deploy
+          Actions:
+            -
+              Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: 1
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplycation
+                DeploymentGroupName: !Ref CodeDeployGroup
+              InputArtifacts: 
+                -
+                  Name: SourceOutput
+              RunOrder: 1
+
+Outputs:
+  CodePipelineArtifactStoreBucket:
+    Value: !Ref CodePipelineArtifactStoreBucket
+
+
+

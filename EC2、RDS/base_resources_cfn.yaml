@@ -1,0 +1,402 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Temporary deployment configuration
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: temp
+    Description: Prefix Name
+
+  TargetRegion:
+    Type: String
+    Default: ap-northeast-1
+
+  VpcBlock:
+    Type: String
+    Default: 192.168.0.0/16
+
+  Ec2InstanceType:
+    Type: String
+    Default: t2.micro
+
+  KeyPair:
+    Type: String
+    Description: Connect to SSH
+
+  AvailabilityZone1:
+    Type: String
+    Default: ap-northeast-1a
+
+  NatPublicSubnetBlock:
+    Type: String
+    Default: 192.168.10.0/24
+
+  WebPrivateSubnetBlock:
+    Type: String
+    Default: 192.168.20.0/24
+
+Resources:
+#=====================================
+# VPC
+#=====================================
+  TempVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-VPC
+#=====================================
+# Subnet
+#=====================================
+  NatPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Ref NatPublicSubnetBlock
+      VpcId: !Ref TempVPC
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-NatPublicSubnet
+
+  WebPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Ref WebPrivateSubnetBlock
+      VpcId: !Ref TempVPC
+      # VpcId:
+      #   - !ImportValue EksWorkVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-WebPrivateSubnet
+
+
+#=====================================
+# InternetGateway
+#=====================================
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref TempVPC
+
+#=====================================
+# SecurityGroup
+#=====================================
+  NatInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Prefix}_nat
+      GroupDescription: web server security group
+      VpcId: !Ref TempVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcBlock
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref WebPrivateSubnetBlock
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}_NatSecurityGroup
+
+  WebInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Prefix}_web
+      GroupDescription: web server security group
+      VpcId: !Ref TempVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !GetAtt NatInstanceSecurityGroup.GroupId
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !GetAtt NatInstanceSecurityGroup.GroupId
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      # SecurityGroupEgress:
+      #   - IpProtocol: tcp
+      #     FromPort: 22
+      #     ToPort: 22
+      #     CidrIp: !Ref NatPublicSubnetBlock
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}_WebSecurityGroup
+
+#=====================================
+# RouteTable
+#=====================================
+  WebPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref TempVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-PrivateRouteTable
+
+  NatPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref TempVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-NatPublicRouteTable
+
+#=====================================
+# Routing
+#=====================================
+  NatPublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref NatPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  WebPrivateSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref WebPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref NatInstance
+
+#=====================================
+# RouteTable Associate
+#=====================================
+  NatPublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref NatPublicSubnet
+      RouteTableId: !Ref NatPublicRouteTable
+
+  WebPrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref WebPrivateSubnet
+      RouteTableId: !Ref WebPrivateRouteTable
+
+#=====================================
+# IAMRole
+#=====================================
+  NatServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-NatServerRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        # - arn:aws:iam::930302704034:policy/CodeDeployRolePolicy
+        # - arn:aws:iam::aws:policy/service-role/AmazonSSMManagedInstanceCore
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  NatServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref NatServerRole
+      InstanceProfileName:  !Sub ${Prefix}_NatServerInstanceProfile
+
+  WebServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-WebServerRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WebServerRole
+      InstanceProfileName:  !Sub ${Prefix}_WebServerInstanceProfile
+
+
+#=====================================
+# Polisy
+#=====================================
+# CodeDeploy Policy
+  CodeDeployRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${Prefix}_CodeDeployRolePolicy
+      Roles:
+      - !Ref NatServerRole
+      - !Ref WebServerRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - s3:Get*
+            - s3:List*
+          Resource:
+            - arn:aws:s3:::aws-codedeploy-ap-northeast-1/*
+            - arn:aws:s3:::aws-codedeploy-ap-northeast-2/*
+
+  # SsmPolicy:
+  #   Type: AWS::IAM::Policy
+  #   Properties:
+  #     PolicyName: !Sub ${Prefix}-SSMPolicy
+  #     PolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Effect: Allow
+  #           Action:
+  #             - ssm:StartSession
+  #           Resource:
+  #             - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${NatInstance}
+  #             - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/SSM-SessionManagerRunShell
+  #             - arn:aws:ssm:*:*:document/AWS-StartSSHSession
+  #           Condition:
+  #             BoolIfExists:
+  #               ssm:SessionDocumentAccessCheck": true
+  #         - Effect: Allow
+  #           Action:
+  #             - ssm:DescribeSessions
+  #             - ssm:GetConnectionStatus
+  #             - ssm:DescribeInstanceProperties
+  #             - ec2:DescribeInstances
+  #           Resource: "*"
+  #         - Effect: Allow
+  #           Action:
+  #             - ssm:TerminateSession
+  #           Resource:
+  #             - arn:aws:ssm:*:*:session/${aws:username}-*
+          # - Effect: Allow
+          #   Action:
+          #     - kms:GenerateDataKey
+          #   Resource:
+          #     - !Ref KeyPair
+
+#=====================================
+# Instance
+#=====================================
+  NatInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref Ec2InstanceType
+      AvailabilityZone: !Ref AvailabilityZone1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+            DeleteOnTermination: true
+      ImageId: ami-0992fc94ca0f1415a
+      KeyName: !Ref KeyPair
+      NetworkInterfaces:
+        - SubnetId: !Ref NatPublicSubnet
+          AssociatePublicIpAddress: true
+          GroupSet:
+            - !Ref NatInstanceSecurityGroup
+          DeviceIndex: 0
+          DeleteOnTermination: true
+      IamInstanceProfile: !Ref NatServerInstanceProfile
+      UserData:
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash
+          set -o xtrace
+          yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+          /opt/aws/bin/cfn-signal --exit-code $? \
+                   --stack  ${AWS::StackName} \
+                   --resource NodeGroup  \
+                   --region ${AWS::Region}
+
+          INSTANCEID=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/instance-id)
+          aws --region ap-northeast-1 ec2 modify-instance-attribute --instance-id $INSTANCEID --source-dest-check "{\"Value\": false}"
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}_NatInstance
+
+  WebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref Ec2InstanceType
+      AvailabilityZone: !Ref AvailabilityZone1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+            DeleteOnTermination: true
+      ImageId: ami-0992fc94ca0f1415a
+      KeyName: !Ref KeyPair
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+      SecurityGroupIds:
+        - !Ref WebInstanceSecurityGroup
+      SubnetId: !Ref WebPrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}_WebInstance
+
+Outputs:
+  VPC:
+    Value: !Ref TempVPC
+    Export:
+      Name: TempVPC
+
+  WebPrivateSubnet:
+    Value: !Ref WebPrivateSubnet
+    Export:
+      Name: !Sub ${Prefix}-WebPrivateSubnet
